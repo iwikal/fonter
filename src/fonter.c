@@ -41,6 +41,7 @@ enum
   TAG_post = 0x74736f70,
   TAG_prep = 0x70657270,
   TAG_truetype = 0x00000100,
+  TAG_truetypecollection = 0x66637474,
 };
 
 typedef struct
@@ -300,6 +301,9 @@ void format4_arrays(struct format4 *sub,
 void parse_format4(struct format4 *sub)
 {
   sub->format = be16toh(sub->format);
+  if (sub->format != 4)
+      fprintf(stderr, "WARNING: unexpected format %d\n", sub->format);
+
   sub->length = be16toh(sub->length);
   sub->language = be16toh(sub->language);
   sub->segCountX2 = be16toh(sub->segCountX2);
@@ -381,51 +385,57 @@ enum
 };
 
 enum { X, Y };
-
-int *parse_coordinates(void **cursor, uint8_t *flags, size_t flags_len, int axis)
+typedef struct
 {
-  uint8_t short_vector = axis == X ? X_SHORT_VECTOR : Y_SHORT_VECTOR;
+  int c[2];
+  int on_curve;
+} point_t;
+
+void parse_coordinates(void **cursor,
+                       uint8_t *flags,
+                       size_t flags_len,
+                       int axis,
+                       point_t *out)
+{
+  uint8_t short_vector = axis == X
+    ? X_SHORT_VECTOR
+    : Y_SHORT_VECTOR;
   uint8_t same_or_pos = axis == X
     ? X_IS_SAME_OR_POSITIVE_X_SHORT_VECTOR
     : Y_IS_SAME_OR_POSITIVE_Y_SHORT_VECTOR;
 
-  int *coordinates = malloc(sizeof(*coordinates) * flags_len);
   for (int i = 0; i < flags_len; i++)
   {
-    coordinates[i] = i == 0 ? 0 : coordinates[i - 1];
+    out[i].c[axis] = i == 0 ? 0 : out[i - 1].c[axis];
 
-    bool on_curve = flags[i] & ON_CURVE_POINT;
+    out[i].on_curve = (flags[i] & ON_CURVE_POINT) != 0;
 
     if (flags[i] & short_vector)
     {
       uint8_t delta = *(uint8_t *)(*cursor);
       *cursor += sizeof(delta);
       int sign = flags[i] & same_or_pos ? 1 : -1;
-      coordinates[i] += delta * sign;
+      out[i].c[axis] += delta * sign;
     }
     else if (!(flags[i] & same_or_pos)) // if same, don't add delta
     {
       int16_t delta = be16toh(*(int16_t *)(*cursor));
       *cursor += sizeof(delta);
-      coordinates[i] += delta;
+      out[i].c[axis] += delta;
     }
     uint8_t flag = flags[i];
   }
-
-  return coordinates;
 }
 
 struct simple_glyph
 {
-  int *x_coords;
-  int *y_coords;
+  point_t *points;
   uint16_t *contour_endpoints;
 };
 
 void free_simple_glyph(struct simple_glyph *simple)
 {
-  free(simple->x_coords);
-  free(simple->y_coords);
+  free(simple->points);
   free(simple->contour_endpoints);
 }
 
@@ -491,6 +501,10 @@ void parse_simple_glyph(struct glyf *glyf, struct simple_glyph *out)
   unsigned num_points = contour_endpoints[num_contours - 1] + 1;
   printf("%d points.\n", num_points);
 
+  uint8_t first_flag = *(uint8_t *)cursor;
+  if (first_flag & OVERLAP_SIMPLE)
+      fprintf(stderr, "WARNING! Overlapping contours. Expect bugs.\n");
+
   while (flags_len < num_points)
   {
     uint8_t flag = *(uint8_t *)(cursor++);
@@ -508,8 +522,9 @@ void parse_simple_glyph(struct glyf *glyf, struct simple_glyph *out)
   flags = realloc(flags, flags_len);
 
   out->contour_endpoints = contour_endpoints;
-  out->x_coords = parse_coordinates(&cursor, flags, flags_len, X);
-  out->y_coords = parse_coordinates(&cursor, flags, flags_len, Y);
+  out->points = malloc(sizeof(*out->points) * num_points);
+  parse_coordinates(&cursor, flags, flags_len, X, out->points);
+  parse_coordinates(&cursor, flags, flags_len, Y, out->points);
 
   free(flags);
 }
@@ -595,7 +610,7 @@ int main(int argc, char *argv[])
   }
 
   argc = 2;
-  argv[1] = "/usr/share/fonts/noto/NotoSans-Regular.ttf";
+  argv[1] = "/usr/share/fonts/noto/NotoSerif-Regular.ttf";
 
   if (argc < 2)
   {
@@ -622,8 +637,11 @@ int main(int argc, char *argv[])
   {
     case TAG_truetype:
       break;
+    case TAG_truetypecollection:
+      printf("TTC not supported\n");
+      return -1;
     default:
-      fprintf(stderr, "not an otf file\n");
+      fprintf(stderr, "not an otf file: %32x\n", dir->sfntVersion);
       return -1;
   }
 
@@ -673,7 +691,8 @@ int main(int argc, char *argv[])
   uint32_t *locations = parse_loca(loca, maxp->numGlyphs, head->indexToLocFormat);
   struct format4 *cmap_subtable = parse_cmap(cmap);
 
-  uint16_t c = utf8_codepoint("b");
+  // FIXME devanagari support: uint16_t c = utf8_codepoint("अ");
+  uint16_t c = utf8_codepoint("ß");
   printf("U+%x\n", c);
 
   struct glyph glyph;
@@ -757,22 +776,15 @@ int main(int argc, char *argv[])
                         0.5f, -0.5f, 0.0f,
                         0.0f,  0.5f, 0.0f };
 
-  unsigned x_coord = 0, y_coord = 0, endpoints = 0, vao = 0;
+  unsigned points = 0, endpoints = 0, vao = 0;
   glGenVertexArrays(1, &vao);
   glBindVertexArray(vao);
 
-  glGenBuffers(1, &x_coord);
-  glBindBuffer(GL_TEXTURE_BUFFER, x_coord);
+  glGenBuffers(1, &points);
+  glBindBuffer(GL_TEXTURE_BUFFER, points);
   glBufferData(GL_TEXTURE_BUFFER,
-               sizeof(int) * glyph_num_points(&glyph),
-               glyph.ty.simple.x_coords,
-               GL_STATIC_DRAW);
-
-  glGenBuffers(1, &y_coord);
-  glBindBuffer(GL_TEXTURE_BUFFER, y_coord);
-  glBufferData(GL_TEXTURE_BUFFER,
-               sizeof(int) * glyph_num_points(&glyph),
-               glyph.ty.simple.y_coords,
+               sizeof(point_t) * glyph_num_points(&glyph),
+               glyph.ty.simple.points,
                GL_STATIC_DRAW);
 
   glGenBuffers(1, &endpoints);
@@ -783,26 +795,21 @@ int main(int argc, char *argv[])
                GL_STATIC_DRAW);
   glBindBuffer(GL_TEXTURE_BUFFER, 0);
 
-  uint textures[3] = { 0, 0, 0 };
+  uint textures[2] = { 0, 0 };
   glGenTextures(3, textures);
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_BUFFER, textures[0]);
-  glTexBuffer(GL_TEXTURE_BUFFER, GL_R32I, x_coord);
+  glTexBuffer(GL_TEXTURE_BUFFER, GL_RGB32I, points);
 
   glActiveTexture(GL_TEXTURE1);
   glBindTexture(GL_TEXTURE_BUFFER, textures[1]);
-  glTexBuffer(GL_TEXTURE_BUFFER, GL_R32I, y_coord);
-
-  glActiveTexture(GL_TEXTURE2);
-  glBindTexture(GL_TEXTURE_BUFFER, textures[2]);
   glTexBuffer(GL_TEXTURE_BUFFER, GL_R16UI, endpoints);
 
   glBindVertexArray(0);
 
   glUseProgram(shader);
 
-  int u_x_coords = glGetUniformLocation(shader, "x_coords");
-  int u_y_coords = glGetUniformLocation(shader, "y_coords");
+  int u_points = glGetUniformLocation(shader, "u_points");
   int u_endpoints = glGetUniformLocation(shader, "endpoints");
   int u_num_contours_location = glGetUniformLocation(shader, "num_contours");
 
@@ -810,9 +817,8 @@ int main(int argc, char *argv[])
     glClear(GL_COLOR_BUFFER_BIT);
 
     glBindVertexArray(vao);
-    glUniform1i(u_x_coords, 0);
-    glUniform1i(u_y_coords, 1);
-    glUniform1i(u_endpoints, 2);
+    glUniform1i(u_points, 0);
+    glUniform1i(u_endpoints, 1);
     glUniform1ui(u_num_contours_location, glyph.num_contours);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
