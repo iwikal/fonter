@@ -641,7 +641,7 @@ int main(int argc, char *argv[])
       printf("TTC not supported\n");
       return -1;
     default:
-      fprintf(stderr, "not an otf file: %32x\n", dir->sfntVersion);
+      fprintf(stderr, "not an otf file: 0x%32x\n", dir->sfntVersion);
       return -1;
   }
 
@@ -813,18 +813,24 @@ int main(int argc, char *argv[])
   int u_endpoints = glGetUniformLocation(shader, "endpoints");
   int u_num_contours_location = glGetUniformLocation(shader, "num_contours");
 
-  while (!glfwWindowShouldClose(window)) {
-    glClear(GL_COLOR_BUFFER_BIT);
+  bool has_drawn = false;
+  while (!glfwWindowShouldClose(window))
+  {
+    if (!has_drawn)
+    {
+      glClear(GL_COLOR_BUFFER_BIT);
 
-    glBindVertexArray(vao);
-    glUniform1i(u_points, 0);
-    glUniform1i(u_endpoints, 1);
-    glUniform1ui(u_num_contours_location, glyph.num_contours);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
+      glBindVertexArray(vao);
+      glUniform1i(u_points, 0);
+      glUniform1i(u_endpoints, 1);
+      glUniform1ui(u_num_contours_location, glyph.num_contours);
+      glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+      glBindVertexArray(0);
 
-    glfwSwapBuffers(window);
-    glfwPollEvents();
+      glfwSwapBuffers(window);
+      has_drawn = true;
+    }
+    glfwWaitEvents();
   }
 
   free_glyph(&glyph);

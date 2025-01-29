@@ -11,6 +11,11 @@ dvec3 point(int j)
     return dvec3(texelFetch(u_points, j).rgb) / dvec3(1024.0, 1024.0, 1);
 }
 
+bool on_curve(dvec3 point)
+{
+    return point.z >= 0.5;
+}
+
 int endpoint(int i)
 {
     return texelFetch(endpoints, i).r;
@@ -32,27 +37,44 @@ dvec2 min_dist_straight(dvec2 pos, dvec2 start, dvec2 end)
     return dvec2(dist * sign(norm), ortho_sq);
 }
 
+/**
+ * Approximate a root of the cubic at^3 + bt^2 + ct + d,
+ * with starting point t.
+ */
 double newton_rhapson_cubic(double t, double a, double b, double c, double d)
 {
-    double da = 3 * a;
-    double db = 2 * b;
-    double dc = c;
-
+    // ten iterations seems to work well enough for now,
+    // more doesn't seem to improve anything
     for (int i = 0; i < 10; i++)
     {
         double t2 = t * t;
         double t3 = t2 * t;
-        double f = a * t3 + b * t2 + c * t + d;
-        double dfdt = 3 * a * t2 + 2 * a * t + c;
+        double f = (a * t3) + (b * t2) + (c * t) + (d);
+        double dfdt = (3 * a * t2) + (2 * b * t) + (c);
         t -= f / dfdt;
     }
 
     return t;
 }
 
-bool on_curve(dvec3 point)
+/**
+ * Approximate a root of the cubic at^3 + bt^2 + ct + d,
+ * with two different starting points t in parallel.
+ */
+dvec2 newton_rhapson_cubic(dvec2 t, double a, double b, double c, double d)
 {
-    return point.z >= 0.5;
+    // ten iterations seems to work well enough for now,
+    // more doesn't seem to improve anything
+    for (int i = 0; i < 10; i++)
+    {
+        dvec2 t2 = t * t;
+        dvec2 t3 = t2 * t;
+        dvec2 f = (a * t3) + (b * t2) + (c * t) + (d);
+        dvec2 dfdt = (3 * a * t2) + (2 * b * t) + (c);
+        t -= f / dfdt;
+    }
+
+    return t;
 }
 
 dvec2 min_dist_bezier(dvec2 pos, dvec2 start, dvec2 control, dvec2 end)
@@ -65,28 +87,24 @@ dvec2 min_dist_bezier(dvec2 pos, dvec2 start, dvec2 control, dvec2 end)
     double c = 2 * dot(bB, bB) + dot(aA, start) - dot(aA, pos);
     double d = dot(bB, start) - dot(bB, pos);
 
-    double min_dist = 1.0 / 0.0;
-    double min_factor;
-    dvec2 nearest_point;
-    for (int i = 0; i < 2; i++)
-    {
-        double root = newton_rhapson_cubic(i, a, b, c, d);
-        double t = clamp(root, 0, 1);
-        dvec2 curve_point = (aA * t * t) + (2 * bB * t) + (start);
-        double dist = dot(curve_point - pos, curve_point - pos);
-        if (dist < min_dist)
-        {
-            min_dist = dist;
-            min_factor = t;
-            nearest_point = curve_point;
-        }
-    }
+    dvec2 root = newton_rhapson_cubic(dvec2(0, 1), a, b, c, d);
+    dvec2 t = clamp(root, 0, 1);
+    dmat2 curve_point = dmat3x2(aA, 2 * bB, start)
+            * transpose(dmat3x2(t * t, t, dvec2(1)));
+    dmat2 dist_vec = curve_point - dmat2(pos, pos);
+    dvec2 dist = dvec2(dot(dist_vec[0], dist_vec[0]),
+            dot(dist_vec[1], dist_vec[1]));
+
+    int i = int(dist.x > dist.y);
+    double min_dist = dist[i];
+    double min_factor = t[i];
+    dvec2 nearest_point = curve_point[i];
 
     dvec2 direction = 2 * (aA * min_factor + bB);
     dvec2 nearest_vec = pos - nearest_point;
 
     double norm = (direction.x * nearest_vec.y - direction.y * nearest_vec.x);
-    double ortho_sq = dot(norm, norm) / dot(b, b);
+    double ortho_sq = norm * norm / dot(direction, direction);
 
     return dvec2(min_dist * sign(norm), ortho_sq);
 }
@@ -116,14 +134,17 @@ void main()
         int len = end_contour - start_contour;
         for (int j = start_contour; j < end_contour; j++)
         {
-            dvec3 a = point(j);
-            dvec3 b = point(j + 1 < end_contour ? j + 1 : j + 1 - len);
-            dvec3 c = point(j + 2 < end_contour ? j + 2 : j + 2 - len);
+            int i = j;
+            dvec3 a = point(i);
+            dvec3 b = point(++i < end_contour ? i : i - len);
+            dvec3 c = point(++i < end_contour ? i : i - len);
+
             dvec2 result;
-            if (on_curve(a) && on_curve(b))
+            if (on_curve(b))
+            {
+                if (!on_curve(a)) continue;
                 result = min_dist_straight(pos, a.xy, b.xy);
-            else if (!on_curve(a) && on_curve(b))
-                continue;
+            }
             else
             {
                 if (!on_curve(a)) a = dvec3((a.xy + b.xy) / 2, 1);
@@ -143,9 +164,18 @@ void main()
         }
     }
 
-    min_dist = sqrt(abs(min_dist)) * sign(min_dist);
+    // TODO: de-magic the magic number
+    min_dist = sqrt(abs(min_dist)) * sign(min_dist) * 256;
     vec3 foreground = vec3(0);
     vec3 background = vec3(1);
-    FragColor.rgb = vec3(min_dist > 0 ? background : foreground);
+    if (true)
+    {
+        // mixing gives some primitive AA.
+        FragColor.rgb = mix(foreground, background, vec3(min_dist));
+    }
+    else
+    {
+        FragColor.rgb = mix(foreground, background, vec3(abs(min_dist)));
+    }
     FragColor.a = 1.0;
 }
