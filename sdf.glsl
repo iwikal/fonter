@@ -39,26 +39,6 @@ dvec2 min_dist_straight(dvec2 pos, dvec2 start, dvec2 end)
 
 /**
  * Approximate a root of the cubic at^3 + bt^2 + ct + d,
- * with starting point t.
- */
-double newton_rhapson_cubic(double t, double a, double b, double c, double d)
-{
-    // ten iterations seems to work well enough for now,
-    // more doesn't seem to improve anything
-    for (int i = 0; i < 10; i++)
-    {
-        double t2 = t * t;
-        double t3 = t2 * t;
-        double f = (a * t3) + (b * t2) + (c * t) + (d);
-        double dfdt = (3 * a * t2) + (2 * b * t) + (c);
-        t -= f / dfdt;
-    }
-
-    return t;
-}
-
-/**
- * Approximate a root of the cubic at^3 + bt^2 + ct + d,
  * with two different starting points t in parallel.
  */
 dvec2 newton_rhapson_cubic(dvec2 t, double a, double b, double c, double d)
@@ -127,6 +107,9 @@ void main()
     double min_dist = 1.0 / 0.0;
     double best_ortho = 0;
 
+    // TODO: maybe rewrite so we're looping over all points in a single loop,
+    // meaning the number of iterations is based on a uniform, which is
+    // supposedly better for the GPU according to Apple
     for (int c = 0; c < num_contours; c++)
     {
         int start_contour = c == 0 ? 0 : endpoint(c - 1) + 1;
@@ -147,8 +130,8 @@ void main()
             }
             else
             {
-                if (!on_curve(a)) a = dvec3((a.xy + b.xy) / 2, 1);
-                if (!on_curve(c)) c = dvec3((b.xy + c.xy) / 2, 1);
+                if (!on_curve(a)) a = (a + b) / 2;
+                if (!on_curve(c)) c = (b + c) / 2;
                 result = min_dist_bezier(pos, a.xy, b.xy, c.xy);
             }
 
