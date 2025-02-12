@@ -3,6 +3,8 @@
 #include <endian.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <error.h>
+#include <errno.h>
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include "truetype.h"
@@ -123,50 +125,85 @@ uint16_t utf8_codepoint(const char *c)
     return 0xfffd;
 }
 
+int checkStatus(GLuint shader)
+{
+    int success, size = 0;
+    bool b = glIsShader(shader);
+
+    if (b) glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+    else glGetProgramiv(shader, GL_LINK_STATUS, &success);
+
+    if (!success)
+    {
+        (b ? glGetShaderiv : glGetProgramiv)(shader, GL_INFO_LOG_LENGTH, &size);
+        char *infolog = malloc(size);
+        (b ? glGetShaderInfoLog : glGetProgramInfoLog)(shader, size, NULL, infolog);
+        fprintf(stderr, "Shader compilation failed:\n%s", infolog);
+        free(infolog);
+        return ERR;
+    }
+
+    return OK;
+}
+
+GLuint compileShader(const char *path, GLenum type)
+{
+    GLuint shader = glCreateShader(type);
+    FILE *f = fopen(path, "r");
+
+    uint8_t *source = NULL;
+    if (readall(f, &source) == -1)
+        error(1, errno, "Failed to read %s", path);
+
+    fclose(f);
+
+    glShaderSource(shader, 1, (const char * const*)&source, NULL);
+    free(source);
+    glCompileShader(shader);
+
+    if (checkStatus(shader) == ERR) return 0;
+
+    return shader;
+}
+
+void debugCallback(GLenum source, GLenum type, GLuint id, GLenum severity,
+                   GLsizei length, const GLchar *message, const void *param)
+{
+    error(0, 0, "%s", message);
+}
+
 int main(int argc, char *argv[])
 {
     GLFWwindow *window;
-    if (!glfwInit())
-        return -1;
+    if (!glfwInit()) error(-1, 0, "Failed to init GLFW");
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_CONTEXT_DEBUG, true);
     glfwWindowHint(GLFW_RESIZABLE, false);
     window = glfwCreateWindow(800, 640, "Fonter", NULL, NULL);
-    if (!window)
-    {
-        fprintf(stderr, "%s: failed to init window\n", argv[0]);
-        glfwTerminate();
-        return -1;
-    }
+    if (!window) error(-1, 0, "Failed to init window");
+
     glfwMakeContextCurrent(window);
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
-    {
-        printf("failed to init GLAD\n");
-        return -1;
-    }
+        error(-1, 0, "Failed to init GLAD");
 
-    argc = 2;
-    argv[1] = "/usr/share/fonts/noto/NotoSerif-Regular.ttf";
+    glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, NULL, true);
+    glDebugMessageCallback(debugCallback, NULL);
 
     if (argc < 2)
     {
-        fprintf(stderr, "usage: %s fontfile.ttf\n", argv[0]);
-        glfwTerminate();
-        return 1;
+        argc = 2;
+        argv[1] = "/usr/share/fonts/noto/NotoSerif-Regular.ttf";
     }
-
-    FILE *fontfile = fopen(argv[1], "rb");
 
     uint8_t *data = NULL;
     {
-        size_t all_size = readall(fontfile, &data);
-        if (all_size == -1)
-        {
-            fprintf(stderr, "%s: failed to read file\n", argv[0]);
-            return -1;
-        }
+        FILE *fontfile = fopen(argv[1], "rb");
+        if (readall(fontfile, &data) == -1)
+            error(-1, errno, "Failed to read %s", fontfile);
+        fclose(fontfile);
     }
 
     struct ttf_reader reader = { .data = data, .cursor = data };
@@ -179,7 +216,7 @@ int main(int argc, char *argv[])
     // FIXME devanagari support: uint16_t c = utf8_codepoint("अ");
     // FIXME wtf:                uint16_t c = utf8_codepoint("h");
     // FIXME wtf:                uint16_t c = utf8_codepoint("k");
-    uint16_t c = utf8_codepoint("8");
+    uint16_t c = utf8_codepoint("h");
     printf("U+%x\n", c);
 
     struct ttf_glyph glyph;
@@ -193,70 +230,20 @@ int main(int argc, char *argv[])
 
     GLuint shader = 0;
     {
-        int success;
-        GLuint vs = glCreateShader(GL_VERTEX_SHADER);
-        uint8_t *source = NULL;
-        if (readall(fopen("quad.glsl", "r"), &source) == -1)
-        {
-            fprintf(stderr, "%s not found\n", "quad.glsl");
-            return -1;
-        };
-
-        glShaderSource(vs, 1, (const char * const*)&source, NULL);
-        free(source);
-        glCompileShader(vs);
-        glGetShaderiv(vs, GL_COMPILE_STATUS, &success);
-        if (!success)
-        {
-            int size = 0;
-            glGetShaderiv(vs, GL_INFO_LOG_LENGTH, &size);
-            char *infolog = malloc(size);
-            glGetShaderInfoLog(vs, size, NULL, infolog);
-            fprintf(stderr, "shader compilation failed:\n%s", infolog);
-            free(infolog);
-            return -1;
-        }
-
-        GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
-        if (readall(fopen("sdf.glsl", "r"), &source) == -1)
-        {
-            fprintf(stderr, "%s not found\n", "sdf.glsl");
-            return -1;
-        };
-
-        glShaderSource(fs, 1, (const char * const*)&source, NULL);
-        free(source);
-        glCompileShader(fs);
-        glGetShaderiv(fs, GL_COMPILE_STATUS, &success);
-        if (!success)
-        {
-            int size = 0;
-            glGetShaderiv(fs, GL_INFO_LOG_LENGTH, &size);
-            char *infolog = malloc(size);
-            glGetShaderInfoLog(fs, size, NULL, infolog);
-            fprintf(stderr, "shader compilation failed:\n%s", infolog);
-            free(infolog);
-            return -1;
-        }
+        GLuint vs = compileShader("quad.glsl", GL_VERTEX_SHADER);
+        if (vs == 0) return -1;
+        GLuint fs = compileShader("sdf.glsl", GL_FRAGMENT_SHADER);
+        if (fs == 0) return -1;
 
         shader = glCreateProgram();
         glAttachShader(shader, vs);
         glAttachShader(shader, fs);
         glLinkProgram(shader);
-        glGetShaderiv(fs, GL_LINK_STATUS, &success);
-        if (!success)
-        {
-            int size = 0;
-            glGetProgramiv(fs, GL_INFO_LOG_LENGTH, &size);
-            char *infolog = malloc(size);
-            glGetProgramInfoLog(fs, size, NULL, infolog);
-            fprintf(stderr, "shader compilation failed:\n%s", infolog);
-            free(infolog);
-            return -1;
-        }
 
         glDeleteShader(vs);
         glDeleteShader(fs);
+
+        if (checkStatus(shader) == ERR) return -1;
     }
 
     float vertices[] = { -0.5f, -0.5f, 0.0f,
