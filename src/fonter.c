@@ -67,22 +67,22 @@ size_t readall(FILE *f, uint8_t **out)
     return size;
 }
 
-void *bmp_to_utf8(uint16_t c, char *utf8_str) {
+void *bmp_to_utf8(uint16_t c, char *s) {
     if (c <= 0x7F) {
         // 1-byte UTF-8
-        utf8_str[0] = (char)c;
-        utf8_str[1] = '\0';
+        s[0] = (char)c;
+        s[1] = '\0';
     } else if (c <= 0x7FF) {
         // 2-byte UTF-8
-        utf8_str[0] = (char)((c >> 6) | 0xC0);
-        utf8_str[1] = (char)((c & 0x3F) | 0x80);
-        utf8_str[2] = '\0';
+        s[0] = (char)((c >> 6) | 0xC0);
+        s[1] = (char)((c & 0x3F) | 0x80);
+        s[2] = '\0';
     } else {
         // 3-byte UTF-8
-        utf8_str[0] = (char)((c >> 12) | 0xE0);
-        utf8_str[1] = (char)(((c >> 6) & 0x3F) | 0x80);
-        utf8_str[2] = (char)((c & 0x3F) | 0x80);
-        utf8_str[3] = '\0';
+        s[0] = (char)((c >> 12) | 0xE0);
+        s[1] = (char)(((c >> 6) & 0x3F) | 0x80);
+        s[2] = (char)((c & 0x3F) | 0x80);
+        s[3] = '\0';
     }
 }
 
@@ -179,7 +179,7 @@ int main(int argc, char *argv[])
     // FIXME devanagari support: uint16_t c = utf8_codepoint("अ");
     // FIXME wtf:                uint16_t c = utf8_codepoint("h");
     // FIXME wtf:                uint16_t c = utf8_codepoint("k");
-    uint16_t c = 0x48b; //utf8_codepoint("ɛ");
+    uint16_t c = utf8_codepoint("8");
     printf("U+%x\n", c);
 
     struct ttf_glyph glyph;
@@ -298,7 +298,8 @@ int main(int argc, char *argv[])
 
     int u_points = glGetUniformLocation(shader, "u_points");
     int u_endpoints = glGetUniformLocation(shader, "endpoints");
-    int u_num_contours_location = glGetUniformLocation(shader, "num_contours");
+    int u_num_contours = glGetUniformLocation(shader, "num_contours");
+    int u_num_points = glGetUniformLocation(shader, "num_points");
 
     bool has_drawn = false;
     while (!glfwWindowShouldClose(window))
@@ -310,7 +311,8 @@ int main(int argc, char *argv[])
             glBindVertexArray(vao);
             glUniform1i(u_points, 0);
             glUniform1i(u_endpoints, 1);
-            glUniform1ui(u_num_contours_location, glyph.num_contours);
+            glUniform1ui(u_num_contours, glyph.num_contours);
+            glUniform1ui(u_num_points, ttf_num_points(&glyph));
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
             glBindVertexArray(0);
 

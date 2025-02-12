@@ -5,6 +5,7 @@ out vec4 FragColor;
 uniform isamplerBuffer u_points;
 uniform isamplerBuffer endpoints;
 uniform uint num_contours;
+uniform uint num_points;
 
 dvec3 point(int j)
 {
@@ -110,40 +111,43 @@ void main()
     // TODO: maybe rewrite so we're looping over all points in a single loop,
     // meaning the number of iterations is based on a uniform, which is
     // supposedly better for the GPU according to Apple
-    for (int c = 0; c < num_contours; c++)
+    int c = -1, start_contour = 0, end_contour = 0;
+    for (int j = 0; j < num_points; j++)
     {
-        int start_contour = c == 0 ? 0 : endpoint(c - 1) + 1;
-        int end_contour = endpoint(c) + 1;
-        int len = end_contour - start_contour;
-        for (int j = start_contour; j < end_contour; j++)
+        if (j == end_contour)
         {
-            int i = j;
-            dvec3 a = point(i);
-            dvec3 b = point(++i < end_contour ? i : i - len);
-            dvec3 c = point(++i < end_contour ? i : i - len);
+            c++;
+            start_contour = j;
+            end_contour = endpoint(c) + 1;
+        }
+        int len = end_contour - start_contour;
 
-            dvec2 result;
-            if (on_curve(b))
-            {
-                if (!on_curve(a)) continue;
-                result = min_dist_straight(pos, a.xy, b.xy);
-            }
-            else
-            {
-                if (!on_curve(a)) a = (a + b) / 2;
-                if (!on_curve(c)) c = (b + c) / 2;
-                result = min_dist_bezier(pos, a.xy, b.xy, c.xy);
-            }
+        int i = j;
+        dvec3 a = point(i);
+        dvec3 b = point(++i < end_contour ? i : i - len);
+        dvec3 c = point(++i < end_contour ? i : i - len);
 
-            double dist = result.x;
-            double ortho_sq = result.y;
-            double diff = abs(min_dist) - abs(dist);
-            double err = 0.00000000001;
-            if (diff > err || abs(diff) <= err && ortho_sq > best_ortho)
-            {
-                min_dist = dist;
-                best_ortho = ortho_sq;
-            }
+        dvec2 result;
+        if (on_curve(b))
+        {
+            if (!on_curve(a)) continue;
+            result = min_dist_straight(pos, a.xy, b.xy);
+        }
+        else
+        {
+            if (!on_curve(a)) a = (a + b) / 2;
+            if (!on_curve(c)) c = (b + c) / 2;
+            result = min_dist_bezier(pos, a.xy, b.xy, c.xy);
+        }
+
+        double dist = result.x;
+        double ortho_sq = result.y;
+        double diff = abs(min_dist) - abs(dist);
+        double err = 0.00000000001;
+        if (diff > err || abs(diff) <= err && ortho_sq > best_ortho)
+        {
+            min_dist = dist;
+            best_ortho = ortho_sq;
         }
     }
 
