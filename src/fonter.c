@@ -1,6 +1,5 @@
 #include <stdlib.h>
 #include <stdint.h>
-#include <endian.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <error.h>
@@ -19,7 +18,7 @@ size_t readall(FILE *f, uint8_t **out)
     size_t size = 0, used = 0;
 
     if (f == NULL || out == NULL || ferror(f))
-        return -1;
+        return ERR;
 
     *out = NULL;
 
@@ -32,7 +31,7 @@ size_t readall(FILE *f, uint8_t **out)
             if (size <= used) // overflow check
             {
                 free(*out);
-                return -1;
+                return ERR;
             }
 
             temp = realloc(*out, size);
@@ -40,7 +39,7 @@ size_t readall(FILE *f, uint8_t **out)
             if (temp == NULL) // OOM check
             {
                 free(*out);
-                return -1;
+                return ERR;
             }
 
             *out = temp;
@@ -55,21 +54,22 @@ size_t readall(FILE *f, uint8_t **out)
     if (ferror(f))
     {
         free(*out);
-        return -1;
+        return ERR;
     }
 
     temp = realloc(*out, used);
     if (temp == NULL)
     {
         free(*out);
-        return -1;
+        return ERR;
     }
     *out = temp;
 
     return size;
 }
 
-void *bmp_to_utf8(uint16_t c, char *s) {
+void bmp_to_utf8(uint16_t c, char *s)
+{
     if (c <= 0x7F) {
         // 1-byte UTF-8
         s[0] = (char)c;
@@ -125,7 +125,7 @@ uint16_t utf8_codepoint(const char *c)
     return 0xfffd;
 }
 
-int checkStatus(GLuint shader)
+int checkStatus(unsigned shader)
 {
     int success, size = 0;
     bool b = glIsShader(shader);
@@ -146,13 +146,13 @@ int checkStatus(GLuint shader)
     return OK;
 }
 
-GLuint compileShader(const char *path, GLenum type)
+unsigned compileShader(const char *path, GLenum type)
 {
-    GLuint shader = glCreateShader(type);
+    unsigned shader = glCreateShader(type);
     FILE *f = fopen(path, "r");
 
     uint8_t *source = NULL;
-    if (readall(f, &source) == -1)
+    if (readall(f, &source) == ERR)
         error(1, errno, "Failed to read %s", path);
 
     fclose(f);
@@ -166,90 +166,34 @@ GLuint compileShader(const char *path, GLenum type)
     return shader;
 }
 
+unsigned shaderProgram(const char *vert_source, const char *frag_source)
+{
+    unsigned vs = compileShader("quad.glsl", GL_VERTEX_SHADER);
+    if (vs == 0) return ERR;
+    unsigned fs = compileShader("sdf.glsl", GL_FRAGMENT_SHADER);
+    if (fs == 0) return ERR;
+
+    unsigned program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glLinkProgram(program);
+
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    if (checkStatus(program) == ERR) return 0;
+
+    return program;
+}
+
 void debugCallback(GLenum source, GLenum type, GLuint id, GLenum severity,
                    GLsizei length, const GLchar *message, const void *param)
 {
     error(0, 0, "%s", message);
 }
 
-int main(int argc, char *argv[])
+unsigned generateGlyphMesh(struct ttf_glyph *glyph)
 {
-    GLFWwindow *window;
-    if (!glfwInit()) error(-1, 0, "Failed to init GLFW");
-
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    glfwWindowHint(GLFW_CONTEXT_DEBUG, true);
-    glfwWindowHint(GLFW_RESIZABLE, false);
-    window = glfwCreateWindow(800, 640, "Fonter", NULL, NULL);
-    if (!window) error(-1, 0, "Failed to init window");
-
-    glfwMakeContextCurrent(window);
-    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
-        error(-1, 0, "Failed to init GLAD");
-
-    glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, NULL, true);
-    glDebugMessageCallback(debugCallback, NULL);
-
-    if (argc < 2)
-    {
-        argc = 2;
-        argv[1] = "/usr/share/fonts/noto/NotoSerif-Regular.ttf";
-    }
-
-    uint8_t *data = NULL;
-    {
-        FILE *fontfile = fopen(argv[1], "rb");
-        if (readall(fontfile, &data) == -1)
-            error(-1, errno, "Failed to read %s", fontfile);
-        fclose(fontfile);
-    }
-
-    struct ttf_reader reader = { .data = data, .cursor = data };
-    {
-        int result = ttf_parse(&reader);
-        printf("result: %d\n", result);
-        printf("num glyphs: %d\n", reader.num_glyphs);
-    }
-
-    // FIXME devanagari support: uint16_t c = utf8_codepoint("अ");
-    // FIXME wtf:                uint16_t c = utf8_codepoint("h");
-    // FIXME wtf:                uint16_t c = utf8_codepoint("k");
-    uint16_t c = utf8_codepoint("h");
-    printf("U+%x\n", c);
-
-    struct ttf_glyph glyph;
-    {
-        uint16_t index = ttf_lookup_index(reader.cmap, c);
-
-        ttf_parse_glyf(&reader, index, &glyph);
-        printf("index %d\n", index);
-        printf("done\n");
-    }
-
-    GLuint shader = 0;
-    {
-        GLuint vs = compileShader("quad.glsl", GL_VERTEX_SHADER);
-        if (vs == 0) return -1;
-        GLuint fs = compileShader("sdf.glsl", GL_FRAGMENT_SHADER);
-        if (fs == 0) return -1;
-
-        shader = glCreateProgram();
-        glAttachShader(shader, vs);
-        glAttachShader(shader, fs);
-        glLinkProgram(shader);
-
-        glDeleteShader(vs);
-        glDeleteShader(fs);
-
-        if (checkStatus(shader) == ERR) return -1;
-    }
-
-    float vertices[] = { -0.5f, -0.5f, 0.0f,
-                          0.5f, -0.5f, 0.0f,
-                          0.0f,  0.5f, 0.0f };
-
     unsigned points = 0, endpoints = 0, vao = 0;
     glGenVertexArrays(1, &vao);
     glBindVertexArray(vao);
@@ -257,20 +201,20 @@ int main(int argc, char *argv[])
     glGenBuffers(1, &points);
     glBindBuffer(GL_TEXTURE_BUFFER, points);
     glBufferData(GL_TEXTURE_BUFFER,
-                 sizeof(contour_point_t) * ttf_num_points(&glyph),
-                 glyph.points,
-                 GL_STATIC_DRAW);
+                 sizeof(contour_point_t) * ttf_num_points(glyph),
+                 glyph->points,
+                 GL_STREAM_DRAW);
 
     glGenBuffers(1, &endpoints);
     glBindBuffer(GL_TEXTURE_BUFFER, endpoints);
     glBufferData(GL_TEXTURE_BUFFER,
-                 sizeof(uint16_t) * glyph.num_contours,
-                 glyph.contour_endpoints,
-                 GL_STATIC_DRAW);
+                 sizeof(uint16_t) * glyph->num_contours,
+                 glyph->contour_endpoints,
+                 GL_STREAM_DRAW);
     glBindBuffer(GL_TEXTURE_BUFFER, 0);
 
     uint textures[2] = { 0, 0 };
-    glGenTextures(3, textures);
+    glGenTextures(2, textures);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_BUFFER, textures[0]);
     glTexBuffer(GL_TEXTURE_BUFFER, GL_RGB32I, points);
@@ -281,12 +225,94 @@ int main(int argc, char *argv[])
 
     glBindVertexArray(0);
 
-    glUseProgram(shader);
+    return vao;
+}
 
+void destroyGlyphMesh(unsigned vao)
+{
+    glBindVertexArray(vao);
+
+    int tex[2];
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_BUFFER, &tex[0]);
+    glActiveTexture(GL_TEXTURE1);
+    glGetIntegerv(GL_TEXTURE_BINDING_BUFFER, &tex[1]);
+    glDeleteTextures(2, (unsigned *)tex);
+
+    glBindVertexArray(0);
+    glDeleteVertexArrays(1, &vao);
+}
+
+int main(int argc, char *argv[])
+{
+    GLFWwindow *window;
+    if (!glfwInit()) error(ERR, 0, "Failed to init GLFW");
+
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_CONTEXT_DEBUG, true);
+    glfwWindowHint(GLFW_RESIZABLE, false);
+    window = glfwCreateWindow(800, 640, "Fonter", NULL, NULL);
+    if (!window) error(ERR, 0, "Failed to init window");
+
+    glfwMakeContextCurrent(window);
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
+        error(ERR, 0, "Failed to init GLAD");
+
+    glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, NULL, true);
+    glDebugMessageCallback(debugCallback, NULL);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glClearColor(1.0, 1.0, 1.0, 1.0);
+
+    if (argc < 2)
+    {
+        argc = 2;
+        argv[1] = "/usr/share/fonts/noto/NotoSerif-Regular.ttf";
+    }
+
+    struct ttf_reader reader;
+    {
+        FILE *fontfile = fopen(argv[1], "rb");
+        if (readall(fontfile, (uint8_t **)&reader.data) == ERR)
+            error(ERR, errno, "Failed to read %s", argv[1]);
+        fclose(fontfile);
+
+        reader.cursor = reader.data;
+        if (ttf_parse(&reader) == ERR)
+            error(ERR, 0, "Failed to parse ttf %s", argv[1]);
+
+        printf("num glyphs: %d\n", reader.num_glyphs);
+    }
+
+    // FIXME devanagari support: uint16_t c = utf8_codepoint("अ");
+    // FIXME wtf:                uint16_t c = utf8_codepoint("h");
+    // FIXME wtf:                uint16_t c = utf8_codepoint("k");
+    // uint16_t c = utf8_codepoint("g");
+
+    unsigned shader = shaderProgram("quad.glsl", "sdf.glsl");
+
+    int u_pos = glGetUniformLocation(shader, "u_pos");
     int u_points = glGetUniformLocation(shader, "u_points");
     int u_endpoints = glGetUniformLocation(shader, "endpoints");
     int u_num_contours = glGetUniformLocation(shader, "num_contours");
     int u_num_points = glGetUniformLocation(shader, "num_points");
+    int u_units_per_em = glGetUniformLocation(shader, "units_per_em");
+    int u_size = glGetUniformLocation(shader, "u_size");
+
+    const char *message = "Hello, world!";
+    int message_len = 2;
+    struct ttf_glyph glyphs[13];
+    unsigned vaos[13];
+    for (int i = 0; i < message_len; i++)
+    {
+        uint16_t c = utf8_codepoint(&message[i]);
+        uint16_t glyph_id = ttf_lookup_index(reader.cmap, c);
+        ttf_parse_glyf(&reader, glyph_id, &glyphs[i]);
+        printf("%c glyph ID %d\n", message[i], glyph_id);
+        vaos[i] = generateGlyphMesh(&glyphs[i]);
+    }
 
     bool has_drawn = false;
     while (!glfwWindowShouldClose(window))
@@ -294,21 +320,37 @@ int main(int argc, char *argv[])
         if (!has_drawn)
         {
             glClear(GL_COLOR_BUFFER_BIT);
+            glUseProgram(shader);
+            glUniform1f(u_units_per_em, (float)reader.units_per_em);
+            glUniform1f(u_size, 100.0);
 
-            glBindVertexArray(vao);
-            glUniform1i(u_points, 0);
-            glUniform1i(u_endpoints, 1);
-            glUniform1ui(u_num_contours, glyph.num_contours);
-            glUniform1ui(u_num_points, ttf_num_points(&glyph));
-            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-            glBindVertexArray(0);
+            float xpos = reader.units_per_em, ypos = 2000;
 
+            for (int i = 0; i < message_len; i++)
+            {
+                if (glyphs[i].num_contours)
+                {
+                    glBindVertexArray(vaos[i]);
+                    glUniform2f(u_pos, xpos, ypos);
+                    glUniform1i(u_points, 0);
+                    glUniform1i(u_endpoints, 1);
+                    glUniform1ui(u_num_contours, glyphs[i].num_contours);
+                    glUniform1ui(u_num_points, ttf_num_points(&glyphs[i]));
+
+                    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+                    glBindVertexArray(0);
+                }
+                xpos += glyphs[i].bbox.x_max;
+            }
+            printf("swapping\n");
             glfwSwapBuffers(window);
+            glUseProgram(0);
+
             has_drawn = true;
         }
+
         glfwWaitEvents();
     }
 
-    free(data);
     return 0;
 }

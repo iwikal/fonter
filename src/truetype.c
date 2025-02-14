@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <error.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include "truetype.h"
@@ -88,7 +89,7 @@ bbox_t read_bbox(struct ttf_reader *reader)
     return result;
 }
 
-RESULT ttf_parse_head(struct ttf_reader *reader, uint16_t *loc_format)
+RESULT ttf_parse_head(struct ttf_reader *reader, int16_t *loc_format)
 {
     if (reader->cursor == NULL)
     {
@@ -96,12 +97,12 @@ RESULT ttf_parse_head(struct ttf_reader *reader, uint16_t *loc_format)
         return ERR;
     }
 
-    read_32(reader); // skip version
+    if (read_32(reader) != 0x10000) return ERR; // check version
     read_32(reader); // skip font revision
     read_32(reader); // skip checksum adjustment
-    read_32(reader); // skip magic number
+    if (read_32(reader) != 0x5f0f3cf5) return ERR; // check magic
     read_16(reader); // skip flags
-    read_16(reader); // skip units per em
+    reader->units_per_em = read_16(reader); // skip units per em
 
     read_date(reader); // skip created
     read_date(reader); // skip modified
@@ -208,7 +209,7 @@ RESULT ttf_parse_cmap(struct ttf_reader *reader)
         return ERR;
     }
 
-    size_t length = read_16(reader); // skip length
+    size_t length = read_16(reader);
     read_16(reader); // skip language
     uint16_t seg_count = read_16(reader) / 2;
     read_16(reader); // skip search range
@@ -273,10 +274,10 @@ RESULT ttf_parse(struct ttf_reader *reader)
 
     for (int i = 0; i < num_tables; i++)
     {
-        uint32_t tag      = read_32(reader);
-        uint32_t checksum = read_32(reader);
-        uint32_t offset   = read_32(reader);
-        /* ignore length */ read_32(reader);
+        uint32_t tag = read_32(reader);
+        read_32(reader); // ignore checksum 
+        uint32_t offset = read_32(reader);
+        read_32(reader); // ignore length 
 
         void *table = reader->data + offset;
         switch (tag)
@@ -304,7 +305,42 @@ RESULT ttf_parse(struct ttf_reader *reader)
     reader->cursor = cmap;
     if (ttf_parse_cmap(reader)) return ERR;
 
+    reader->cursor = hhea;
+    if (ttf_parse_hhea(reader)) return ERR;
+
     reader->glyphs = glyf;
+
+    return OK;
+}
+
+RESULT ttf_parse_hhea(struct ttf_reader *reader)
+{
+    if (read_32(reader) != 0x10000)
+    {
+        error(0, 0, "wrong magic");
+        return ERR;
+    }
+
+    /*
+    FWord ascender           = read_16(reader);
+    FWord descender          = read_16(reader);
+    FWord line_gap           = read_16(reader);
+    UFWord advance_max       = read_16(reader);
+    FWord min_lsb            = read_16(reader);
+    FWord min_rsb            = read_16(reader);
+    FWord x_max_extent       = read_16(reader);
+    int16_t caret_slope_rise = read_16(reader);
+    int16_t caret_slope_run  = read_16(reader);
+    int16_t caret_offset     = read_16(reader);
+    read_16(reader); // reserved
+    read_16(reader); // reserved
+    read_16(reader); // reserved
+    read_16(reader); // reserved
+    read_16(reader); // 0 for current format
+    */
+
+    reader->cursor += sizeof(int16_t) * 15;
+    reader->num_hmetrics = read_16(reader);
 
     return OK;
 }
@@ -387,6 +423,7 @@ void ttf_parse_coordinates(struct ttf_reader *reader,
 
 int ttf_num_points(struct ttf_glyph *glyph)
 {
+    if (glyph->num_contours == 0) return 0;
     return glyph->contour_endpoints[glyph->num_contours - 1] + 1;
 }
 
@@ -395,6 +432,20 @@ RESULT ttf_parse_glyf(struct ttf_reader *reader,
                       struct ttf_glyph *glyph)
 {
     int offset = reader->locations[index];
+    int next_offset = reader->locations[index + 1];
+    if (offset == next_offset)
+    {
+        // empty glyph
+        glyph->num_contours = 0;
+        glyph->bbox.x_min = 0;
+        glyph->bbox.y_min = 0;
+        glyph->bbox.x_max = 0;
+        glyph->bbox.y_max = 0;
+        glyph->points = NULL;
+        glyph->contour_endpoints = NULL;
+        return OK;
+    }
+
     void *old_cursor = reader->cursor;
     reader->cursor = reader->glyphs + offset;
 
@@ -409,8 +460,6 @@ RESULT ttf_parse_glyf(struct ttf_reader *reader,
     glyph->num_contours = num_contours;
     glyph->bbox = read_bbox(reader);
     
-    printf("simple! %d contours.\n", num_contours);
-
     uint16_t *contour_endpoints = malloc(sizeof(*contour_endpoints) * num_contours);
     for (int i = 0; i < num_contours; i++)
         contour_endpoints[i] = read_16(reader);
@@ -423,7 +472,6 @@ RESULT ttf_parse_glyf(struct ttf_reader *reader,
     size_t flags_cap = 0;
 
     unsigned num_points = contour_endpoints[num_contours - 1] + 1;
-    printf("%d points.\n", num_points);
 
     while (flags_len < num_points)
     {

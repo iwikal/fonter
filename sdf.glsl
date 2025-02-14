@@ -2,14 +2,22 @@
 
 out vec4 FragColor;
 
+uniform vec2 u_pos;
 uniform isamplerBuffer u_points;
 uniform isamplerBuffer endpoints;
 uniform uint num_contours;
 uniform uint num_points;
+uniform float units_per_em;
+uniform float u_size;
+
+dvec3 scale()
+{
+    return dvec3(u_size / units_per_em, u_size / units_per_em, 1);
+}
 
 dvec3 point(int j)
 {
-    return dvec3(texelFetch(u_points, j).rgb) / dvec3(1024.0, 1024.0, 1);
+    return (dvec3(u_pos, 0) + dvec3(texelFetch(u_points, j).rgb)) * scale();
 }
 
 bool on_curve(dvec3 point)
@@ -92,8 +100,7 @@ dvec2 min_dist_bezier(dvec2 pos, dvec2 start, dvec2 control, dvec2 end)
 
 void main()
 {
-    dvec2 dims = dvec2(800, 640);
-    dvec2 pos = 2 * gl_FragCoord.xy / dims - 1;
+    dvec2 pos = gl_FragCoord.xy;
 
     vec3 colors[7] = vec3[7](
             vec3(0.0, 0.0, 0.0),
@@ -153,16 +160,7 @@ void main()
 
     // TODO: de-magic the magic number
     min_dist = sqrt(abs(min_dist)) * sign(min_dist) * 256;
-    vec3 foreground = vec3(0);
-    vec3 background = vec3(1);
-    if (true)
-    {
-        // mixing gives some primitive AA.
-        FragColor.rgb = mix(foreground, background, vec3(min_dist));
-    }
-    else
-    {
-        FragColor.rgb = mix(foreground, background, vec3(abs(min_dist)));
-    }
-    FragColor.a = 1.0;
+    vec3 foreground = vec3(1, 0, 1);
+    FragColor.rgb = foreground;
+    FragColor.a = float(-min_dist);
 }
