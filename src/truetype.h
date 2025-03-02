@@ -16,12 +16,18 @@ struct cmap_4
     uint16_t tail[];
 };
 
+struct hmetric
+{
+    UFWord advance_width;
+    FWord left_side_bearing;
+};
+
 struct ttf_reader
 {
     void *data;
     void *cursor;
     void *glyphs;
-    void *hmetrics;
+    struct hmetric *hmetrics;
     struct cmap_4 *cmap;
     uint32_t *locations;
     uint16_t num_glyphs;

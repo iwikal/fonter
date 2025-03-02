@@ -9,6 +9,8 @@ uniform uint num_contours;
 uniform uint num_points;
 uniform float units_per_em;
 uniform float u_size;
+uniform ivec2 u_bbox_min;
+uniform ivec2 u_bbox_max;
 
 dvec3 scale()
 {
@@ -47,20 +49,19 @@ dvec2 min_dist_straight(dvec2 pos, dvec2 start, dvec2 end)
 }
 
 /**
- * Approximate a root of the cubic at^3 + bt^2 + ct + d,
+ * Approximate a root of the cubic xt^3 + yt^2 + zt + w,
  * with two different starting points t in parallel.
  */
-dvec2 newton_rhapson_cubic(dvec2 t, double a, double b, double c, double d)
+dvec2 newton_rhapson_cubic(dvec2 t, dvec4 f)
 {
     // ten iterations seems to work well enough for now,
     // more doesn't seem to improve anything
-    for (int i = 0; i < 10; i++)
+    dvec4 g = dvec4(0, 3*f.x, 2*f.y, f.z);
+
+    for (int i = 0; i < 2; i++)
     {
-        dvec2 t2 = t * t;
-        dvec2 t3 = t2 * t;
-        dvec2 f = (a * t3) + (b * t2) + (c * t) + (d);
-        dvec2 dfdt = (3 * a * t2) + (2 * b * t) + (c);
-        t -= f / dfdt;
+        dmat4x2 bases = dmat4x2(t*t*t, t*t, t, dvec2(1));
+        t -= (bases * f) / (bases * g);
     }
 
     return t;
@@ -71,12 +72,13 @@ dvec2 min_dist_bezier(dvec2 pos, dvec2 start, dvec2 control, dvec2 end)
     dvec2 aA = start - 2 * control + end;
     dvec2 bB = control - start;
 
-    double a = dot(aA, aA);
-    double b = 3 * dot(aA, bB);
-    double c = 2 * dot(bB, bB) + dot(aA, start) - dot(aA, pos);
-    double d = dot(bB, start) - dot(bB, pos);
+    dvec2 root = newton_rhapson_cubic(
+            dvec2(0, 1),
+            dvec4(dot(aA, aA),
+                3 * dot(aA, bB),
+                2 * dot(bB, bB) + dot(aA, start) - dot(aA, pos),
+                dot(bB, start) - dot(bB, pos)));
 
-    dvec2 root = newton_rhapson_cubic(dvec2(0, 1), a, b, c, d);
     dvec2 t = clamp(root, 0, 1);
     dmat2 curve_point = dmat3x2(aA, 2 * bB, start)
             * transpose(dmat3x2(t * t, t, dvec2(1)));
@@ -98,69 +100,79 @@ dvec2 min_dist_bezier(dvec2 pos, dvec2 start, dvec2 control, dvec2 end)
     return dvec2(min_dist * sign(norm), ortho_sq);
 }
 
+bool min_dist_either(dvec2 pos, dvec3 a, dvec3 b, dvec3 c, out dvec2 result)
+{
+    if (on_curve(b))
+    {
+        if (!on_curve(a)) return true;
+        result = min_dist_straight(pos, a.xy, b.xy);
+    }
+    else
+    {
+        if (!on_curve(a)) a = (a + b) / 2;
+        if (!on_curve(c)) c = (b + c) / 2;
+        result = min_dist_bezier(pos, a.xy, b.xy, c.xy);
+    }
+
+    return false;
+}
+
+double inside_bbox(dvec2 pos)
+{
+    dvec2 bbox_min = dvec2((u_pos + u_bbox_min) * u_size / units_per_em);
+    dvec2 bbox_max = dvec2((u_pos + u_bbox_max) * u_size / units_per_em);
+    dvec2 s = step(bbox_min, pos) * step(pos, bbox_max);
+    return s.x * s.y;
+}
+
 void main()
 {
     dvec2 pos = gl_FragCoord.xy;
 
-    vec3 colors[7] = vec3[7](
-            vec3(0.0, 0.0, 0.0),
-            vec3(0.0, 0.0, 1.0),
-            vec3(0.0, 1.0, 0.0),
-            vec3(0.0, 0.8, 0.8),
-            vec3(1.0, 0.0, 0.0),
-            vec3(0.8, 0.0, 0.8),
-            vec3(0.8, 0.8, 0.0)
-        );
+    if (inside_bbox(pos) < 0.5) discard;
+
+    vec3 colors[7] = vec3[7](vec3(0.0, 0.0, 0.0),
+                             vec3(0.0, 0.0, 1.0),
+                             vec3(0.0, 1.0, 0.0),
+                             vec3(0.0, 0.8, 0.8),
+                             vec3(1.0, 0.0, 0.0),
+                             vec3(0.8, 0.0, 0.8),
+                             vec3(0.8, 0.8, 0.0));
 
     double min_dist = 1.0 / 0.0;
     double best_ortho = 0;
 
-    // TODO: maybe rewrite so we're looping over all points in a single loop,
-    // meaning the number of iterations is based on a uniform, which is
-    // supposedly better for the GPU according to Apple
     int c = -1, start_contour = 0, end_contour = 0;
-    for (int j = 0; j < num_points; j++)
+    for (int point_index = 0; point_index < num_points; point_index++)
     {
-        if (j == end_contour)
+        if (point_index == end_contour)
         {
             c++;
-            start_contour = j;
+            start_contour = point_index;
             end_contour = endpoint(c) + 1;
         }
-        int len = end_contour - start_contour;
 
-        int i = j;
+        int i = point_index;
         dvec3 a = point(i);
-        dvec3 b = point(++i < end_contour ? i : i - len);
-        dvec3 c = point(++i < end_contour ? i : i - len);
-
+        dvec3 b = point(++i < end_contour ? i : i - end_contour + start_contour);
+        dvec3 c = point(++i < end_contour ? i : i - end_contour + start_contour);
         dvec2 result;
-        if (on_curve(b))
-        {
-            if (!on_curve(a)) continue;
-            result = min_dist_straight(pos, a.xy, b.xy);
-        }
-        else
-        {
-            if (!on_curve(a)) a = (a + b) / 2;
-            if (!on_curve(c)) c = (b + c) / 2;
-            result = min_dist_bezier(pos, a.xy, b.xy, c.xy);
-        }
+        if (min_dist_either(pos, a, b, c, result)) continue;
 
-        double dist = result.x;
-        double ortho_sq = result.y;
-        double diff = abs(min_dist) - abs(dist);
-        double err = 0.00000000001;
-        if (diff > err || abs(diff) <= err && ortho_sq > best_ortho)
+        double diff = abs(min_dist) - abs(result.x);
+        const double err = 0.00000000001;
+        if (diff > err || abs(diff) <= err && result.y > best_ortho)
         {
-            min_dist = dist;
-            best_ortho = ortho_sq;
+            min_dist = result.x;
+            best_ortho = result.y;
         }
     }
 
     // TODO: de-magic the magic number
-    min_dist = sqrt(abs(min_dist)) * sign(min_dist) * 256;
-    vec3 foreground = vec3(1, 0, 1);
-    FragColor.rgb = foreground;
-    FragColor.a = float(-min_dist);
+    min_dist = sqrt(abs(min_dist)) * sign(min_dist) - 0.4;
+    vec3 foreground = vec3(0);
+    vec3 background = vec3(0, 1, 0);
+    float alpha = float(-min_dist);
+    FragColor.rgb = foreground; //mix(background, foreground, alpha);
+    FragColor.a = alpha;
 }

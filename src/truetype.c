@@ -63,6 +63,11 @@ uint16_t read_16(struct ttf_reader *reader)
     return ms << 8 | ls;
 }
 
+float read_f2dot14(struct ttf_reader *reader)
+{
+    return ((float) (int16_t) read_16(reader)) / 16384.0;
+}
+
 uint32_t read_32(struct ttf_reader *reader)
 {
     uint32_t ms, ls;
@@ -148,11 +153,6 @@ RESULT ttf_parse_loca(struct ttf_reader *reader, uint16_t loc_format)
 
     size_t size = sizeof(*reader->locations) * (reader->num_glyphs + 1);
     reader->locations = malloc(size);
-    if (reader->locations == NULL)
-    {
-        fprintf(stderr, "out of memory\n");
-        return ERR;
-    }
 
     for (int i = 0; i < reader->num_glyphs; i++)
     {
@@ -218,11 +218,6 @@ RESULT ttf_parse_cmap(struct ttf_reader *reader)
 
     size_t tail_len = subtable + length - reader->cursor;
     struct cmap_4 *sub = malloc(sizeof(struct cmap_4) + tail_len);
-    if (sub == NULL)
-    {
-        fprintf(stderr, "out of memory\n");
-        return ERR;
-    }
 
     sub->seg_count = seg_count;
     for (int i = 0; i < tail_len / sizeof(uint16_t); i++)
@@ -269,7 +264,7 @@ RESULT ttf_parse(struct ttf_reader *reader)
     read_16(reader); // skip entry selector
     read_16(reader); // skip range shift
 
-    void *head = NULL, *maxp = NULL, *hhea = NULL,
+    void *head = NULL, *maxp = NULL, *hhea = NULL, *hmtx = NULL,
          *cmap = NULL, *loca = NULL, *glyf = NULL;
 
     for (int i = 0; i < num_tables; i++)
@@ -285,6 +280,7 @@ RESULT ttf_parse(struct ttf_reader *reader)
             case TAG_head: head = table; break;
             case TAG_maxp: maxp = table; break;
             case TAG_hhea: hhea = table; break;
+            case TAG_hmtx: hmtx = table; break;
             case TAG_cmap: cmap = table; break;
             case TAG_loca: loca = table; break;
             case TAG_glyf: glyf = table; break;
@@ -307,6 +303,9 @@ RESULT ttf_parse(struct ttf_reader *reader)
 
     reader->cursor = hhea;
     if (ttf_parse_hhea(reader)) return ERR;
+
+    reader->cursor = hmtx;
+    if (ttf_parse_hmtx(reader)) return ERR;
 
     reader->glyphs = glyf;
 
@@ -341,6 +340,26 @@ RESULT ttf_parse_hhea(struct ttf_reader *reader)
 
     reader->cursor += sizeof(int16_t) * 15;
     reader->num_hmetrics = read_16(reader);
+
+    return OK;
+}
+
+RESULT ttf_parse_hmtx(struct ttf_reader *reader)
+{
+    reader->hmetrics = malloc(sizeof(*reader->hmetrics) * reader->num_hmetrics);
+
+    int i = 0;
+    for (; i < reader->num_hmetrics; i++)
+    {
+        reader->hmetrics[i].advance_width = read_16(reader);
+        reader->hmetrics[i].left_side_bearing = read_16(reader);
+    }
+
+    for (; i < reader->num_glyphs; i++)
+    {
+        reader->hmetrics[i].advance_width = reader->hmetrics[i - 1].advance_width;
+        reader->hmetrics[i].left_side_bearing = read_16(reader);
+    }
 
     return OK;
 }
@@ -427,41 +446,13 @@ int ttf_num_points(struct ttf_glyph *glyph)
     return glyph->contour_endpoints[glyph->num_contours - 1] + 1;
 }
 
-RESULT ttf_parse_glyf(struct ttf_reader *reader,
-                      uint16_t index,
-                      struct ttf_glyph *glyph)
+static RESULT parse_simple_glyf(struct ttf_reader *reader,
+                                struct ttf_glyph *glyph)
 {
-    int offset = reader->locations[index];
-    int next_offset = reader->locations[index + 1];
-    if (offset == next_offset)
-    {
-        // empty glyph
-        glyph->num_contours = 0;
-        glyph->bbox.x_min = 0;
-        glyph->bbox.y_min = 0;
-        glyph->bbox.x_max = 0;
-        glyph->bbox.y_max = 0;
-        glyph->points = NULL;
-        glyph->contour_endpoints = NULL;
-        return OK;
-    }
+    uint16_t *contour_endpoints =
+        malloc(sizeof(*contour_endpoints) * glyph->num_contours);
 
-    void *old_cursor = reader->cursor;
-    reader->cursor = reader->glyphs + offset;
-
-    int16_t num_contours = read_16(reader);
-    if (num_contours < 0)
-    {
-        fprintf(stderr, "WARNING: Compound glyph!\n");
-        reader->cursor = old_cursor;
-        return ERR;
-    }
-
-    glyph->num_contours = num_contours;
-    glyph->bbox = read_bbox(reader);
-    
-    uint16_t *contour_endpoints = malloc(sizeof(*contour_endpoints) * num_contours);
-    for (int i = 0; i < num_contours; i++)
+    for (int i = 0; i < glyph->num_contours; i++)
         contour_endpoints[i] = read_16(reader);
 
     uint16_t instruction_len = read_16(reader);
@@ -471,7 +462,7 @@ RESULT ttf_parse_glyf(struct ttf_reader *reader,
     size_t flags_len = 0;
     size_t flags_cap = 0;
 
-    unsigned num_points = contour_endpoints[num_contours - 1] + 1;
+    unsigned num_points = contour_endpoints[glyph->num_contours - 1] + 1;
 
     while (flags_len < num_points)
     {
@@ -495,7 +486,200 @@ RESULT ttf_parse_glyf(struct ttf_reader *reader,
     ttf_parse_coordinates(reader, flags, flags_len, Y, glyph->points);
 
     free(flags);
+    return OK;
+}
+
+static void apply_transform(float mat[2][2], contour_point_t *point)
+{
+    float result[2] = { 0.0, 0.0 };
+    for (int i = 0; i < 2; i++)
+        for (int j = 0; j < 2; j++)
+            result[i] += mat[i][j] * point->c[j];
+
+    point->c[0] = result[0] + 0.5;
+    point->c[0] = result[1] + 0.5;
+}
+
+static RESULT parse_compound_glyf(struct ttf_reader *reader,
+                                  struct ttf_glyph *glyph)
+{
+    printf("compound glyph\n");
+
+    enum
+    {
+        ARG_1_AND_2_ARE_WORDS     = 0x0001,
+        ARGS_ARE_XY_VALUES        = 0x0002,
+        ROUND_XY_TO_GRID          = 0x0004,
+        WE_HAVE_A_SCALE           = 0x0008,
+        MORE_COMPONENTS           = 0x0020,
+        WE_HAVE_AN_X_AND_Y_SCALE  = 0x0040,
+        WE_HAVE_A_TWO_BY_TWO      = 0x0080,
+        WE_HAVE_INSTRUCTIONS      = 0x0100,
+        USE_MY_METRICS            = 0x0200,
+        OVERLAP_COMPOUND          = 0x0400,
+        SCALED_COMPONENT_OFFSET   = 0x0800,
+        UNSCALED_COMPONENT_OFFSET = 0x1000,
+    };
+
+    glyph->num_contours = 0;
+    int cap_contours = 0;
+    glyph->contour_endpoints = NULL;
+    glyph->points = NULL;
+    int num_points = 0;
+    int cap_points = 0;
+
+    uint16_t flags;
+    do
+    {
+        flags = read_16(reader);
+        printf("    flags %04x. ", flags);
+        uint16_t index = read_16(reader);
+        uint16_t arg1, arg2;
+        if (flags & ARG_1_AND_2_ARE_WORDS)
+        {
+            arg1 = read_16(reader);
+            arg2 = read_16(reader);
+        }
+        else
+        {
+            uint16_t both = read_16(reader);
+            arg1 = both >> 8;
+            arg2 = both & 0xff;
+        }
+
+        float matrix[2][2] = { { 1.0, 0.0 },
+                               { 0.0, 1.0 } };
+        if (flags & WE_HAVE_A_SCALE)
+        {
+            float scale = read_f2dot14(reader);
+            matrix[0][0] = matrix[1][1] = scale;
+        }
+        else if (flags & WE_HAVE_AN_X_AND_Y_SCALE)
+        {
+            matrix[0][0] = read_f2dot14(reader);
+            matrix[1][1] = read_f2dot14(reader);
+        }
+        else if (flags & WE_HAVE_A_TWO_BY_TWO)
+        {
+            // Not a mistake, I'm transposing the matrix on purpose.
+            // The file stores it in column-major form, C is row-major
+            matrix[0][0] = read_f2dot14(reader);
+            matrix[1][0] = read_f2dot14(reader);
+            matrix[0][1] = read_f2dot14(reader);
+            matrix[1][1] = read_f2dot14(reader);
+        }
+
+        struct ttf_glyph child;
+        if (ttf_parse_glyf(reader, index, &child)) goto fail;
+
+        int child_np = ttf_num_points(&child);
+        printf("child %d has %d points and %d contours\n",
+               index,
+               child_np,
+               child.num_contours);
+        for (int i = 0; i < child.num_contours; i++)
+        {
+            if (glyph->num_contours >= cap_contours)
+            {
+                if (cap_contours == 0) cap_contours = 2;
+                cap_contours *= 2;
+                glyph->contour_endpoints =
+                    realloc(glyph->contour_endpoints,
+                            sizeof(*glyph->contour_endpoints) * cap_contours);
+            }
+            glyph->contour_endpoints[glyph->num_contours++] =
+                child.contour_endpoints[i] + num_points;
+        }
+
+        if ((flags & ARGS_ARE_XY_VALUES) == 0)
+            error(1, 0, "TODO: contour point offset weirdness");
+
+        for (int i = 0; i < child_np; i++)
+        {
+            if (num_points >= cap_points)
+            {
+                if (cap_points == 0) cap_points = 2;
+                cap_points *= 2;
+                glyph->points =
+                    realloc(glyph->points, sizeof(*glyph->points) * cap_points);
+            }
+            glyph->points[num_points] = child.points[i];
+            if (flags & SCALED_COMPONENT_OFFSET)
+            {
+                glyph->points[num_points].c[0] += (int16_t) arg1;
+                glyph->points[num_points].c[1] += (int16_t) arg2;
+                apply_transform(matrix, &glyph->points[num_points]);
+            }
+            else
+            {
+                apply_transform(matrix, &glyph->points[num_points]);
+                glyph->points[num_points].c[0] += (int16_t) arg1;
+                glyph->points[num_points].c[1] += (int16_t) arg2;
+            }
+            num_points++;
+        }
+
+        free(child.contour_endpoints);
+        free(child.points);
+    } while (flags & MORE_COMPONENTS);
+
+    glyph->contour_endpoints =
+        realloc(glyph->contour_endpoints,
+                sizeof(*glyph->contour_endpoints) * glyph->num_contours);
+    glyph->points = realloc(glyph->points, sizeof(*glyph->points) * num_points);
+
+    return OK;
+
+    /*
+    if (flags & WE_HAVE_INSTRUCTIONS)
+    {
+        uint16_t num_instr = read_16();
+        reader->cursor += num_instr;
+    }
+    */
+fail:
+    free(glyph->contour_endpoints);
+    free(glyph->points);
+    return ERR;
+}
+
+RESULT ttf_parse_glyf(struct ttf_reader *reader,
+                      uint16_t index,
+                      struct ttf_glyph *glyph)
+{
+    int offset = reader->locations[index];
+    int next_offset = reader->locations[index + 1];
+    if (offset == next_offset) // empty glyph
+    {
+        glyph->num_contours = 0;
+        glyph->bbox.x_min = 0;
+        glyph->bbox.y_min = 0;
+        glyph->bbox.x_max = 0;
+        glyph->bbox.y_max = 0;
+        glyph->points = NULL;
+        glyph->contour_endpoints = NULL;
+        return OK;
+    }
+
+    void *old_cursor = reader->cursor;
+    reader->cursor = reader->glyphs + offset;
+
+    glyph->num_contours = read_16(reader);
+    glyph->bbox = read_bbox(reader);
+
+    if (glyph->num_contours < 0)
+    {
+        if (parse_compound_glyf(reader, glyph)) goto fail;
+    }
+    else
+    {
+        if (parse_simple_glyf(reader, glyph)) goto fail;
+    }
 
     reader->cursor = old_cursor;
     return OK;
+
+fail:
+    reader->cursor = old_cursor;
+    return ERR;
 }
