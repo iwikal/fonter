@@ -387,6 +387,8 @@ unsigned generate_glyph_mesh(struct ttf_glyph *glyph,
     glBindVertexArray(vao);
 
     // FIXME why is this necessary???
+    // NOTE: it might have something to do with certain control points being on
+    // top of others, probably creating singularities. But why?
     for (int i = 0, n = ttf_num_points(glyph); i < n; i++)
     {
         glyph->points[i].c[0] += i % 2;
