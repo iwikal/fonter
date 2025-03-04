@@ -10,32 +10,22 @@
 #include "shortmap.h"
 
 #ifndef READALL_CHUNK
-#define READALL_CHUNK 0x40000000 // 1 MB
+#define READALL_CHUNK 4096
 #endif
 
 size_t readall(FILE *f, uint8_t **out);
-
 void bmp_to_utf8(uint16_t c, char *s);
-
 uint16_t utf8_codepoint(const char *c);
-
 bool utf8_continuation(char c);
-
 int utf8_codepoint_len(char c);
-
 int check_status(unsigned shader);
-
 unsigned compile_shader(const char *path, GLenum type);
-
 unsigned shader_program(const char *vert_source, const char *frag_source);
-
 void debug_callback(GLenum source, GLenum type, GLuint id, GLenum severity,
-                   GLsizei length, const GLchar *message, const void *param);
-
-unsigned generate_glyph_mesh(struct ttf_glyph *glyph,
-                             unsigned textures[2]);
-
+                    GLsizei length, const GLchar *message, const void *param);
+unsigned generate_glyph_mesh(struct ttf_glyph *glyph, unsigned textures[2]);
 void destroy_glyph_mesh(unsigned vao);
+
 
 int main(int argc, char *argv[])
 {
@@ -47,7 +37,8 @@ int main(int argc, char *argv[])
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_CONTEXT_DEBUG, true);
     glfwWindowHint(GLFW_RESIZABLE, false);
-    window = glfwCreateWindow(800, 640, "Fonter", NULL, NULL);
+    int width = 800, height = 640;
+    window = glfwCreateWindow(width, height, "Fonter", NULL, NULL);
     if (!window) error(ERR, 0, "Failed to init window");
 
     glfwMakeContextCurrent(window);
@@ -63,7 +54,7 @@ int main(int argc, char *argv[])
     if (argc < 2)
     {
         argc = 2;
-        argv[1] = "/usr/share/fonts/noto/NotoSerif-Regular.ttf";
+        argv[1] = "/usr/share/fonts/noto/NotoSerifDevanagari-Regular.ttf";
     }
 
     struct ttf_reader reader;
@@ -87,6 +78,7 @@ int main(int argc, char *argv[])
 
     unsigned shader = shader_program("quad.glsl", "sdf.glsl");
 
+    int u_dims = glGetUniformLocation(shader, "u_dims");
     int u_pos = glGetUniformLocation(shader, "u_pos");
     int u_points = glGetUniformLocation(shader, "u_points");
     int u_endpoints = glGetUniformLocation(shader, "endpoints");
@@ -97,7 +89,7 @@ int main(int argc, char *argv[])
     int u_bbox_min = glGetUniformLocation(shader, "u_bbox_min");
     int u_bbox_max = glGetUniformLocation(shader, "u_bbox_max");
 
-    const char message[] = "Yxmördaren Julia Blomqvist på fäktning i Schweiz";
+    const char message[] = "बकवास";
 
     struct glyph_mesh
     {
@@ -107,8 +99,7 @@ int main(int argc, char *argv[])
         unsigned textures[2];
     };
 
-    shortmap_t meshes_actual = shortmap_create(16);
-    shortmap_t *meshes = &meshes_actual;
+    shortmap_t meshes = shortmap_create(16);
 
     for (int i = 0, n; n = utf8_codepoint_len(message[i]), message[i] != 0; i += n)
     {
@@ -120,7 +111,7 @@ int main(int argc, char *argv[])
         uint16_t glyph_id = ttf_lookup_index(reader.cmap, c);
 
         // skip if we've already generated this mesh
-        if (shortmap_get(meshes, glyph_id) != NULL) continue;
+        if (shortmap_get(&meshes, glyph_id) != NULL) continue;
 
         struct glyph_mesh *mesh = malloc(sizeof(*mesh));
         mesh->id = glyph_id;
@@ -128,7 +119,8 @@ int main(int argc, char *argv[])
             error(1, 0, "failed to parse glyf %d (%s)", glyph_id, s);
 
         mesh->vao = generate_glyph_mesh(&mesh->glyph, mesh->textures);
-        shortmap_insert(meshes, glyph_id, mesh);
+
+        shortmap_insert(&meshes, glyph_id, mesh);
     }
 
     bool has_drawn = false;
@@ -138,18 +130,21 @@ int main(int argc, char *argv[])
         {
             glClear(GL_COLOR_BUFFER_BIT);
 
+            float fontsize = 24.0;
             glUseProgram(shader);
             glUniform1f(u_units_per_em, (float)reader.units_per_em);
-            glUniform1f(u_size, 32.0);
+            glUniform1f(u_size, fontsize);
+            glUniform2i(u_dims, width, height);
 
-            float xpos = reader.units_per_em, ypos = 500;
+            float xpos = reader.units_per_em,
+                  ypos = 26900 / 2;
 
             for (int i = 0, n; n = utf8_codepoint_len(message[i]), message[i] != 0; i += n)
             {
                 uint16_t c = utf8_codepoint(&message[i]);
                 uint16_t glyph_id = ttf_lookup_index(reader.cmap, c);
 
-                struct glyph_mesh *mesh = shortmap_get(meshes, glyph_id);
+                struct glyph_mesh *mesh = shortmap_get(&meshes, glyph_id);
 
                 if (mesh->glyph.num_contours > 0)
                 {
@@ -171,14 +166,15 @@ int main(int argc, char *argv[])
                     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
                 }
 
-                xpos += reader.hmetrics[mesh->id].advance_width;
+                float advance = reader.hmetrics[mesh->id].advance_width;
+                xpos += advance;
             }
 
             glBindVertexArray(0);
             glUseProgram(0);
 
             glfwSwapBuffers(window);
-            has_drawn = true;
+            // has_drawn = true;
         }
 
         glfwWaitEvents();
@@ -240,7 +236,7 @@ size_t readall(FILE *f, uint8_t **out)
     }
     *out = temp;
 
-    return size;
+    return used;
 }
 
 void bmp_to_utf8(uint16_t c, char *s)
@@ -307,19 +303,11 @@ bool utf8_continuation(char c)
 
 int utf8_codepoint_len(char c)
 {
-    if ((c & 0x80) == 0)
-        return 1;
-
-    if ((c & 0xe0) == 0xc0)
-        return 2;
-
-    if ((c & 0xf0) == 0xe0)
-        return 3;
-
-    if ((c & 0xf8) == 0xf0)
-        return 4;
-
-    return 0;
+    if ((c & 0x80) == 0x00) return 1;
+    if ((c & 0xe0) == 0xc0) return 2;
+    if ((c & 0xf0) == 0xe0) return 3;
+    if ((c & 0xf8) == 0xf0) return 4;
+    return 1;
 }
 
 int check_status(unsigned shader)
@@ -350,12 +338,13 @@ unsigned compile_shader(const char *path, GLenum type)
     FILE *f = fopen(path, "r");
 
     uint8_t *source = NULL;
-    if (readall(f, &source) == ERR)
+    int size = readall(f, &source);
+    if (size == ERR)
         error(1, errno, "Failed to read %s", path);
 
     fclose(f);
 
-    glShaderSource(shader, 1, (const char * const*)&source, NULL);
+    glShaderSource(shader, 1, (const char * const*)&source, &size);
     free(source);
     glCompileShader(shader);
 
@@ -396,6 +385,13 @@ unsigned generate_glyph_mesh(struct ttf_glyph *glyph,
     unsigned points = 0, endpoints = 0, vao = 0;
     glGenVertexArrays(1, &vao);
     glBindVertexArray(vao);
+
+    // FIXME why is this necessary???
+    for (int i = 0, n = ttf_num_points(glyph); i < n; i++)
+    {
+        glyph->points[i].c[0] += i % 2;
+        glyph->points[i].c[1] += (i / 2) % 2;
+    }
 
     glGenBuffers(1, &points);
     glBindBuffer(GL_TEXTURE_BUFFER, points);

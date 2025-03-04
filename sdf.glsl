@@ -117,27 +117,9 @@ bool min_dist_either(dvec2 pos, dvec3 a, dvec3 b, dvec3 c, out dvec2 result)
     return false;
 }
 
-double inside_bbox(dvec2 pos)
-{
-    dvec2 bbox_min = dvec2((u_pos + u_bbox_min) * u_size / units_per_em);
-    dvec2 bbox_max = dvec2((u_pos + u_bbox_max) * u_size / units_per_em);
-    dvec2 s = step(bbox_min, pos) * step(pos, bbox_max);
-    return s.x * s.y;
-}
-
 void main()
 {
     dvec2 pos = gl_FragCoord.xy;
-
-    if (inside_bbox(pos) < 0.5) discard;
-
-    vec3 colors[7] = vec3[7](vec3(0.0, 0.0, 0.0),
-                             vec3(0.0, 0.0, 1.0),
-                             vec3(0.0, 1.0, 0.0),
-                             vec3(0.0, 0.8, 0.8),
-                             vec3(1.0, 0.0, 0.0),
-                             vec3(0.8, 0.0, 0.8),
-                             vec3(0.8, 0.8, 0.0));
 
     double min_dist = 1.0 / 0.0;
     double best_ortho = 0;
@@ -171,8 +153,8 @@ void main()
     // TODO: de-magic the magic number
     min_dist = sqrt(abs(min_dist)) * sign(min_dist) - 0.4;
     vec3 foreground = vec3(0);
-    vec3 background = vec3(0, 1, 0);
+    vec3 background = vec3(1, 0, 0);
     float alpha = float(-min_dist);
-    FragColor.rgb = foreground; //mix(background, foreground, alpha);
+    FragColor.rgb = foreground; // mix(background, foreground, alpha);
     FragColor.a = alpha;
 }

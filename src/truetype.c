@@ -346,7 +346,7 @@ RESULT ttf_parse_hhea(struct ttf_reader *reader)
 
 RESULT ttf_parse_hmtx(struct ttf_reader *reader)
 {
-    reader->hmetrics = malloc(sizeof(*reader->hmetrics) * reader->num_hmetrics);
+    reader->hmetrics = malloc(sizeof(*reader->hmetrics) * reader->num_glyphs);
 
     int i = 0;
     for (; i < reader->num_hmetrics; i++)
@@ -496,15 +496,13 @@ static void apply_transform(float mat[2][2], contour_point_t *point)
         for (int j = 0; j < 2; j++)
             result[i] += mat[i][j] * point->c[j];
 
-    point->c[0] = result[0] + 0.5;
-    point->c[0] = result[1] + 0.5;
+    point->c[0] = (int) (result[0] + 0.5);
+    point->c[1] = (int) (result[1] + 0.5);
 }
 
 static RESULT parse_compound_glyf(struct ttf_reader *reader,
                                   struct ttf_glyph *glyph)
 {
-    printf("compound glyph\n");
-
     enum
     {
         ARG_1_AND_2_ARE_WORDS     = 0x0001,
@@ -532,7 +530,6 @@ static RESULT parse_compound_glyf(struct ttf_reader *reader,
     do
     {
         flags = read_16(reader);
-        printf("    flags %04x. ", flags);
         uint16_t index = read_16(reader);
         uint16_t arg1, arg2;
         if (flags & ARG_1_AND_2_ARE_WORDS)
@@ -543,8 +540,8 @@ static RESULT parse_compound_glyf(struct ttf_reader *reader,
         else
         {
             uint16_t both = read_16(reader);
-            arg1 = both >> 8;
-            arg2 = both & 0xff;
+            arg1 = (int8_t) (both >> 8);
+            arg2 = (int8_t) (both & 0xff);
         }
 
         float matrix[2][2] = { { 1.0, 0.0 },
@@ -573,10 +570,6 @@ static RESULT parse_compound_glyf(struct ttf_reader *reader,
         if (ttf_parse_glyf(reader, index, &child)) goto fail;
 
         int child_np = ttf_num_points(&child);
-        printf("child %d has %d points and %d contours\n",
-               index,
-               child_np,
-               child.num_contours);
         for (int i = 0; i < child.num_contours; i++)
         {
             if (glyph->num_contours >= cap_contours)
@@ -600,8 +593,8 @@ static RESULT parse_compound_glyf(struct ttf_reader *reader,
             {
                 if (cap_points == 0) cap_points = 2;
                 cap_points *= 2;
-                glyph->points =
-                    realloc(glyph->points, sizeof(*glyph->points) * cap_points);
+                glyph->points = realloc(glyph->points,
+                                        sizeof(*glyph->points) * cap_points);
             }
             glyph->points[num_points] = child.points[i];
             if (flags & SCALED_COMPONENT_OFFSET)
@@ -628,15 +621,15 @@ static RESULT parse_compound_glyf(struct ttf_reader *reader,
                 sizeof(*glyph->contour_endpoints) * glyph->num_contours);
     glyph->points = realloc(glyph->points, sizeof(*glyph->points) * num_points);
 
-    return OK;
-
-    /*
     if (flags & WE_HAVE_INSTRUCTIONS)
     {
-        uint16_t num_instr = read_16();
+        uint16_t num_instr = read_16(reader);
         reader->cursor += num_instr;
+        printf("we skipped %d instructions\n", num_instr);
     }
-    */
+
+    return OK;
+
 fail:
     free(glyph->contour_endpoints);
     free(glyph->points);

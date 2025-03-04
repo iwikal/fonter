@@ -11,4 +11,7 @@ run: fonter
 tags: ${SRC} ${INC}
 	ctags $^
 
-.PHONY: run
+clean:
+	rm ./fonter
+
+.PHONY: run clean
